@@ -436,16 +436,38 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
         });
         break;
         
-      case 'tool_result':
+      case 'tool_result': {
+        let content: any;
+        if (typeof block.content === 'string') {
+          content = block.content;
+        } else {
+          // Native content blocks — Anthropic tool_result accepts text + image
+          // (base64 only). Other block types fall back to a JSON text stub.
+          content = block.content.map((b) => {
+            if (b.type === 'text') {
+              return { type: 'text', text: b.text };
+            }
+            if (b.type === 'image' && b.source.type === 'base64') {
+              return {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: b.source.mediaType,
+                  data: b.source.data,
+                },
+              };
+            }
+            return { type: 'text', text: JSON.stringify(b) };
+          });
+        }
         result.push({
           type: 'tool_result',
           tool_use_id: block.toolUseId,
-          content: typeof block.content === 'string'
-            ? block.content
-            : JSON.stringify(block.content),
+          content,
           is_error: block.isError,
         });
         break;
+      }
         
       case 'thinking':
         result.push({
