@@ -26,10 +26,16 @@ and existing environment-based authentication retain their existing behavior;
 a static environment token cannot refresh itself. Applications must opt in and
 supply a credential source that can actually read or refresh a newer token.
 
-The SDK's HTTP boundary uses Membrane's shared resolver seam. It resolves for
+Each SDK operation gets an isolated client with Membrane's shared resolver
+seam at its HTTP boundary. It resolves for
 each network attempt, including cache-keepalive replay, refreshes once after an
 HTTP 401, and never replays an accepted stream in response to an in-stream auth
-error. Other SDK retry behavior remains unchanged. The SDK request signal also
+error. The refresh bound is per SDK fetch attempt. Other SDK retry behavior remains
+unchanged: for example, an exhausted HTTP 401 with `x-should-retry: true` can
+cause another SDK attempt and another bounded refresh. Resolver failures are
+separate: they abort that SDK operation before connection retries can run and
+surface the original MembraneError (or an auth error for an untyped failure).
+Empty/non-string tokens fail the same way, before HTTP. The SDK request signal also
 bounds waiting on the resolver. Refresh serialization and OAuth exchanges remain
 application responsibilities.
 

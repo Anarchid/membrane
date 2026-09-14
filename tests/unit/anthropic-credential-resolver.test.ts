@@ -136,3 +136,54 @@ describe('Anthropic rotating credentials through the real SDK', () => {
     }
   });
 });
+
+for (const lane of ['complete', 'stream'] as const) {
+  it.each(['throw', 'empty'] as const)(`preserves credential failures without SDK reacquisition (${lane}, %s)`, async kind => {
+    const { authError } = await import('../../src/index.js');
+    const failure = authError('login required');
+    let resolutions = 0;
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const adapter = new AnthropicAdapter({ credentials: () => {
+      resolutions++;
+      if (kind === 'throw') throw failure;
+      return { token: '' };
+    }, cacheKeepalive: { enabled: false } });
+    const pending = lane === 'complete' ? adapter.complete(request) : adapter.stream(request, { onChunk: () => {} });
+    if (kind === 'throw') await expect(pending).rejects.toBe(failure);
+    else await expect(pending).rejects.toMatchObject({ type: 'auth', message: expect.stringContaining('non-empty string') });
+    expect(resolutions).toBe(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+}
+
+it('does not reacquire after the forced-refresh resolver fails', async () => {
+  const { authError } = await import('../../src/index.js');
+  const failure = authError('refresh token expired');
+  const flags: boolean[] = [];
+  const fetch = vi.fn(async () => unauthorized());
+  vi.stubGlobal('fetch', fetch);
+  const adapter = new AnthropicAdapter({ credentials: ({ forceRefresh }) => {
+    flags.push(forceRefresh);
+    if (forceRefresh) throw failure;
+    return { token: 'expired' };
+  }, cacheKeepalive: { enabled: false } });
+  await expect(adapter.complete(request)).rejects.toBe(failure);
+  expect(flags).toEqual([false, true]);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('isolates a failing acquisition from concurrent successful requests', async () => {
+  const { authError } = await import('../../src/index.js');
+  const failure = authError('login required');
+  let acquisitions = 0;
+  vi.stubGlobal('fetch', async () => completed());
+  const adapter = new AnthropicAdapter({ credentials: async () => {
+    if (++acquisitions === 1) throw failure;
+    return { token: 'valid' };
+  }, cacheKeepalive: { enabled: false } });
+  const results = await Promise.allSettled([adapter.complete(request), adapter.complete(request)]);
+  expect(results[0]).toMatchObject({ status: 'rejected', reason: failure });
+  expect(results[1]).toMatchObject({ status: 'fulfilled' });
+  expect(acquisitions).toBe(2);
+});

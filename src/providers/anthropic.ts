@@ -24,7 +24,7 @@ import {
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { assertTerminalEventObserved } from './utils.js';
-import { fetchWithCredentials, type CredentialContext, type CredentialResolver } from './credentials.js';
+import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
 // ============================================================================
@@ -205,6 +205,7 @@ export class AnthropicAdapter implements ProviderAdapter {
    */
   readonly usageCacheConvention = 'cache-excluded' as const;
   private client: Anthropic;
+  private readonly credentials?: CredentialResolver;
   private defaultMaxTokens: number;
   /** Any anthropic-beta value from defaultHeaders (e.g. the oauth beta for
    *  subscription tokens). Per-request headers REPLACE same-key defaults in
@@ -228,23 +229,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     const credentials: CredentialResolver | undefined = config.credentials ?? (typeof authToken === 'function'
       ? async (context: CredentialContext) => ({ token: await authToken(context) })
       : undefined);
+    this.credentials = credentials;
     if (credentials) {
       // Satisfy SDK auth validation without freezing a real credential. The
       // fetch seam replaces this placeholder before every network attempt,
       // including the SDK's stream and cache-keepalive transports.
       clientOptions.authToken = 'membrane-resolved-at-request-time';
       clientOptions.apiKey = null;
-      clientOptions.fetch = (input, init) => {
-        const headers = new Headers(init?.headers);
-        headers.delete('x-api-key');
-        return fetchWithCredentials(input, { ...init, headers }, async context => {
-          const credential = await credentials(context);
-          // A resolver/default/dynamic header must not re-enable API-key auth.
-          const resolvedHeaders = new Headers(credential.headers);
-          resolvedHeaders.delete('x-api-key');
-          return { ...credential, headers: Object.fromEntries(resolvedHeaders) };
-        });
-      };
     } else if (authToken !== undefined) {
       clientOptions.authToken = authToken as string | null;
       clientOptions.apiKey = null;
@@ -261,12 +252,60 @@ export class AnthropicAdapter implements ProviderAdapter {
           // Replay path. Deliberately bypasses buildRequest(): the payload is
           // the already-built wire request from a real call, and rebuilding it
           // risks a byte diff that silently converts a 0.1x read into a 2x write.
-          async (wire, headers) => await this.client.messages.create(
-            wire as unknown as Anthropic.MessageCreateParamsNonStreaming,
-            headers ? { headers } : undefined,
+          async (wire, headers) => this.createMessage(
+            wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
           config.cacheKeepalive ?? {},
         );
+  }
+
+  /** One SDK operation owns its failure state: concurrent calls cannot
+   * overwrite each other's auth error or cancel each other's requests. */
+  private credentialSession(signal?: AbortSignal) {
+    const credentials = this.credentials;
+    if (!credentials) return { client: this.client, signal, failure: () => undefined };
+    const abort = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+    let failure: MembraneError | undefined;
+    const client = this.client.withOptions({
+      fetch: (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.delete('x-api-key');
+        return fetchWithCredentials(input, { ...init, headers }, async context => {
+          try {
+            const credential = await credentials(context);
+            validateCredential(credential);
+            const resolvedHeaders = new Headers(credential.headers);
+            resolvedHeaders.delete('x-api-key');
+            return { ...credential, headers: Object.fromEntries(resolvedHeaders) };
+          } catch (error) {
+            if (combined.aborted) throw error;
+            failure = error instanceof MembraneError ? error : authError(
+              `Credential resolution failed: ${error instanceof Error ? error.message : String(error)}`, error,
+            );
+            // SDK 0.52 retries thrown fetch errors as connection failures.
+            // Abort this operation to bypass that loop, then restore the
+            // original error at the complete/stream/keepalive boundary.
+            abort.abort(failure);
+            throw failure;
+          }
+        });
+      },
+    });
+    return { client, signal: combined, failure: () => failure };
+  }
+
+  private async createMessage(
+    request: Anthropic.MessageCreateParamsNonStreaming,
+    headers?: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Anthropic.Message> {
+    const session = this.credentialSession(signal);
+    try {
+      return await session.client.messages.create(request, { headers, signal: session.signal });
+    } catch (error) {
+      throw session.failure() ?? error;
+    }
   }
 
   supportsModel(modelId: string): boolean {
@@ -287,10 +326,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     );
 
     try {
-      const response = await this.client.messages.create(fullRequest, {
-        signal: options?.signal,
-        headers: this.liveHeaders(headers, 'complete'),
-      });
+      const response = await this.createMessage(
+        fullRequest, this.liveHeaders(headers, 'complete'), options?.signal,
+      );
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
@@ -358,10 +396,11 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
 
     resetIdleTimer();
+    const session = this.credentialSession(idleAbort.signal);
 
     try {
-      const stream = await this.client.messages.stream(anthropicRequest, {
-        signal: idleAbort.signal,
+      const stream = await session.client.messages.stream(anthropicRequest, {
+        signal: session.signal,
         headers: this.liveHeaders(this.betaHeaders(request), 'stream'),
       });
 
@@ -599,7 +638,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         });
       }
-      throw this.handleError(error, fullRequest);
+      throw this.handleError(session.failure() ?? error, fullRequest);
     }
   }
 
