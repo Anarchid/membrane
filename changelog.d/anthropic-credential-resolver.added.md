@@ -1,0 +1,2 @@
+- Allow `AnthropicAdapter` to resolve rotating bearer credentials per request through `credentials` or an `authToken` callback, with one forced refresh after HTTP 401. The shared seam covers complete, streaming, and cache-keepalive requests without freezing a token in the SDK client.
+- Surface resolver failures and invalid tokens as authentication errors without allowing SDK connection retries to repeat credential acquisition. Each SDK operation owns its failure/cancellation state, including cache-keepalive sends, so concurrent requests cannot cancel one another.
