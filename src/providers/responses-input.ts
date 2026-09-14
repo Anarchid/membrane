@@ -129,4 +129,3 @@ function asString(value: unknown): string {
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
-

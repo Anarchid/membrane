@@ -33,7 +33,7 @@ export async function fetchWithCredentials(
       ? await resolveWithSignal(credentials, forceRefresh, signal)
       : credentials;
     signal?.throwIfAborted();
-    if (!credential.token) throw authError('Credential resolver returned an empty token');
+    validateCredential(credential);
     const headers = new Headers(init.headers);
     for (const [key, value] of Object.entries(credential.headers ?? {})) headers.set(key, value);
     if (typeof credentials === 'function' || !headers.has('Authorization')) {
@@ -41,7 +41,7 @@ export async function fetchWithCredentials(
     }
     const response = await fetch(input, { ...init, headers });
     if (response.status !== 401 || typeof credentials !== 'function' || forceRefresh) return response;
-    await response.body?.cancel();
+    void response.body?.cancel().catch(() => {});
   }
   throw new Error('Unreachable credential retry state');
 }
@@ -66,5 +66,12 @@ async function resolveWithSignal(
     }), aborted]);
   } finally {
     signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/** Runtime validation also protects JavaScript callers and external resolvers. */
+export function validateCredential(credential: ResolvedCredential): void {
+  if (!credential || typeof credential.token !== 'string' || credential.token.trim().length === 0) {
+    throw authError('Credential resolver must return a non-empty string token');
   }
 }

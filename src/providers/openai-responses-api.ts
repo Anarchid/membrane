@@ -143,7 +143,7 @@ export interface OpenAIResponsesAPIAdapterConfig {
 // ============================================================================
 
 export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
-  readonly name = 'openai-responses-api';
+  readonly name: string = 'openai-responses-api';
 
   /**
    * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's account-wide
@@ -158,6 +158,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private readonly apiKey: string;
   private readonly credentials?: CredentialResolver;
   private readonly subscription: boolean;
+  readonly requiresNativeResponsesInput: boolean;
   private fastMode: boolean;
   private readonly onFastModeFallback?: (serviceTier: string) => void;
   private warnedFastFallback = false;
@@ -169,6 +170,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
   constructor(config: OpenAIResponsesAPIAdapterConfig = {}) {
     this.subscription = config.mode === 'subscription';
+    this.requiresNativeResponsesInput = !this.subscription;
     this.credentials = config.credentials;
     if (this.subscription && !this.credentials) {
       throw new Error('Subscription mode requires a credential resolver');
@@ -307,7 +309,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         for (const data of parser.feed(decoder.decode())) processData(data);
         for (const data of parser.flush()) processData(data);
       } finally {
-        await reader.cancel().catch(() => {});
+        void reader.cancel().catch(() => {});
         reader.releaseLock();
       }
 

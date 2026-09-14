@@ -528,7 +528,9 @@ export class Membrane {
    * item array, and a generic override (for example Context Manager's
    * NativeFormatter) produces Anthropic-style `{ role, content: [{ type:
    * 'text' }] }` envelopes the Responses API rejects before inference — so a
-   * configured Responses formatter stays authoritative there.
+   * configured Responses formatter stays authoritative there. Subscription
+   * mode accepts normalized envelopes, so its capability allows the override
+   * (including participant labels supplied by maintenance formatters).
    *
    * The exception is why this selection is a method rather than a `??` at each
    * call site: while it lived inside transformRequest alone, the BUILD honored
@@ -537,7 +539,9 @@ export class Membrane {
    * Every entry point selects once, here, and threads the result.
    */
   private resolveActiveFormatter(requestFormatter?: PrefillFormatter): PrefillFormatter {
-    if (this.adapter.name === 'openai-responses-api' && this.formatter.name === 'openai-responses') {
+    const requiresNativeInput = this.adapter.requiresNativeResponsesInput
+      ?? this.adapter.name === 'openai-responses-api';
+    if (requiresNativeInput && this.formatter.name === 'openai-responses') {
       return this.formatter;
     }
     return requestFormatter ?? this.formatter;

@@ -25,7 +25,8 @@ const membrane = new Membrane(adapter, { formatter: new OpenAIResponsesFormatter
 ```
 
 The resolver runs for each outgoing call. An HTTP 401 triggers one additional
-resolution with `forceRefresh: true`; the rejected body is closed first. A
+resolution with `forceRefresh: true`; cancellation of the rejected body is initiated first. Cleanup does not wait for
+other readers of a cloned/tee’d response. A
 second 401, any 403, or an error inside an accepted SSE stream is surfaced to the
 caller without authentication replay. Credential resolution uses the same
 cancellation/deadline signal as HTTP. Implementations should honor that signal;
@@ -47,7 +48,10 @@ fallback tier invokes the optional callback once per adapter.
 Native Responses items retain their metadata and encrypted reasoning. The
 subscription compatibility path also accepts normalized maintenance text,
 images, tool calls/results, and encrypted reasoning blocks. API mode retains its
-existing verbatim native-input contract. Both modes share output reconstruction,
+existing verbatim native-input contract. Subscription mode honors per-request formatter overrides, retaining names in
+multi-participant maintenance calls. API mode keeps its native-input formatter
+guard. Decorators must forward `requiresNativeResponsesInput` and
+`usageCacheConvention` so these contracts survive wrapping. Both modes share output reconstruction,
 terminal-event validation, nested SSE error classification, and multiline SSE
 parsing. Nonempty terminal output takes precedence over accumulated stream items.
 

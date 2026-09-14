@@ -407,3 +407,63 @@ test('replays historical encrypted reasoning through the formatter with a requir
     { type: 'reasoning', encrypted_content: 'historic-cipher', summary: [] },
   ]));
 });
+
+for (const lane of ['complete', 'stream'] as const) {
+  test(`keeps participant names from an auxiliary NativeFormatter override (${lane})`, async () => {
+    let input: unknown;
+    globalThis.fetch = async (_url, init) => {
+      input = JSON.parse(String(init?.body)).input;
+      return completedResponse();
+    };
+    const { NativeFormatter } = await import('../../src/index.js');
+    const membrane = new Membrane(new OpenAIResponsesAPIAdapter({
+      mode: 'subscription', credentials: () => ({ token: 'fixture' }),
+    }), { formatter: new OpenAIResponsesFormatter() });
+    const normalized = {
+      messages: [
+        { participant: 'Alice', content: [{ type: 'text' as const, text: 'first' }] },
+        { participant: 'Bob', content: [{ type: 'text' as const, text: 'second' }] },
+      ], config: { model: 'gpt-5.4', maxTokens: 64 },
+    };
+    const options = { formatter: new NativeFormatter({ participantMode: 'multiuser' }) };
+    if (lane === 'complete') await membrane.complete(normalized, options);
+    else await membrane.stream(normalized, { onChunk: () => {}, ...options });
+    expect(JSON.stringify(input)).toContain('Alice: first');
+    expect(JSON.stringify(input)).toContain('Bob: second');
+  });
+}
+
+test.each(['retry', 'stream-error'] as const)('does not wait for a cloned response during %s cleanup', async scenario => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const source = new ReadableStream<Uint8Array>({ start(value) {
+    controller = value;
+    if (scenario === 'stream-error') value.enqueue(new TextEncoder().encode(
+      'data: {"type":"error","error":{"code":"invalid_api_key","message":"expired"}}\n\n',
+    ));
+  } });
+  const response = new Response(source, { status: scenario === 'retry' ? 401 : 200 });
+  const clone = response.clone(); // logging observer deliberately does not drain
+  let calls = 0;
+  globalThis.fetch = async () => ++calls === 1 ? response : completedResponse();
+  const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: () => ({ token: 't' }) });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      adapter.complete(request(), { timeoutMs: 10 }).then(() => 'completed', error => error.type),
+      new Promise<string>(resolve => { timer = setTimeout(() => resolve('hung'), 100); }),
+    ]);
+    expect(result).toBe(scenario === 'retry' ? 'completed' : 'auth');
+  } finally {
+    clearTimeout(timer);
+    controller.close();
+    await clone.text();
+  }
+});
+
+test.each(['', {}, null])('rejects malformed resolved token %j before HTTP', async token => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return completedResponse(); };
+  const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: () => ({ token } as any) });
+  await expect(adapter.complete(request())).rejects.toMatchObject({ type: 'auth' });
+  expect(calls).toBe(0);
+});
