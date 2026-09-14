@@ -12,6 +12,26 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.5.85 — 2026-09-14
+
+### Added
+
+- Allow `AnthropicAdapter` to resolve rotating bearer credentials per request through `credentials` or an `authToken` callback, with one forced refresh after HTTP 401. The shared seam covers complete, streaming, and cache-keepalive requests without freezing a token in the SDK client.
+- Surface resolver failures and invalid tokens as authentication errors without allowing SDK connection retries to repeat credential acquisition. Each SDK operation owns its failure/cancellation state, including cache-keepalive sends, so concurrent requests cannot cancel one another.
+
+- Add ChatGPT subscription mode to `OpenAIResponsesAPIAdapter`, with per-request credentials, one refresh after HTTP 401, Fast mode, maintenance-input conversion, and shared Responses streaming and usage normalization. Login and token persistence remain application responsibilities.
+- Include the required empty reasoning summary when formatting encrypted-reasoning blocks without a provider-native item, so historical reasoning can be replayed through Responses.
+- API-key Responses calls now classify HTTP 403 as authentication failure, other ordinary 400s as invalid requests, and all 5xx responses (including 504) as retryable server failures; honor Retry-After headers; and parse multiline SSE events. Static keys retain their existing header precedence and do not trigger credential refresh.
+- Allow subscription maintenance calls to use per-request formatters and retain participant names. Adapter decorators must forward `requiresNativeResponsesInput` alongside `usageCacheConvention`.
+- Keep response-body cleanup from blocking credential retries or stream failures when a logging observer retains a cloned body; reject non-string or blank resolver tokens before HTTP.
+
+### Fixed
+
+- OpenAI Images adapter: a previous output carried forward in history as a
+  `generated_image` block is now attached to `/v1/images/edits` and referenced
+  in the transcript like any other image, instead of being silently dropped
+  (Greptile review on #71).
+
 ## 0.5.84 — 2026-09-08
 
 ### Added
