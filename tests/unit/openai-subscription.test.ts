@@ -61,16 +61,21 @@ describe('OpenAI Responses subscription mode', () => {
 
     const grown = request();
     grown.messages = [...grown.messages, { type: 'message', role: 'user', content: 'A later turn' }];
-    const otherStream = { ...request(), system: 'You compress transcripts.' };
+    const otherStream = request();
+    otherStream.messages = [{ type: 'message', role: 'user', content: 'A different conversation head' }];
+    const sameHeadOtherTools = { ...request(), tools: [{ name: 'noop', description: 'noop', inputSchema: { type: 'object' } }] };
 
     await adapter.complete(request());
     await adapter.stream(grown, { onChunk: () => {} });
     await adapter.complete(otherStream);
     await adapter.complete(request({ prompt_cache_key: 'agent:devops' }));
+    await adapter.complete(sameHeadOtherTools as ProviderRequest);
 
     expect(seen[0].header).toMatch(/^[0-9a-f-]{36}:[0-9a-f]{12}$/);
     expect(seen[0].key).toBe(seen[0].header);
-    // Appending turns keeps the id; a different stream on the same adapter gets its own.
+    // Grouping is by serialized head: appended turns and a different tool list keep
+    // the id, a different first item gets its own.
+    expect(seen[4].header).toBe(seen[0].header);
     expect(seen[1].header).toBe(seen[0].header);
     expect(seen[2].header).not.toBe(seen[0].header);
     expect(seen[2].header!.slice(0, 36)).toBe(seen[0].header!.slice(0, 36));
@@ -78,7 +83,23 @@ describe('OpenAI Responses subscription mode', () => {
 
     const pinned = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials, sessionId: 'pinned' });
     await pinned.complete(request());
-    expect(seen[4].header).toMatch(/^pinned:[0-9a-f]{12}$/);
+    expect(seen[5].header).toMatch(/^pinned:[0-9a-f]{12}$/);
+    // The digest is salted with the base id, so it is not a bare content fingerprint.
+    expect(seen[5].header!.slice(-12)).not.toBe(seen[0].header!.slice(-12));
+  });
+
+  test('extraHeaders overrides the computed session_id in any casing, without joining', async () => {
+    const seen: Array<string | null> = [];
+    globalThis.fetch = async (_input, init) => {
+      seen.push(new Headers(init?.headers).get('session_id'));
+      return completedResponse();
+    };
+    const credentials: CredentialResolver = async () => ({ token: 'subscription-token' });
+    for (const name of ['session_id', 'Session_Id']) {
+      const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials, extraHeaders: { [name]: 'fixed' } });
+      await adapter.complete(request());
+    }
+    expect(seen).toEqual(['fixed', 'fixed']);
   });
 
   test('a cache key that is not a valid header value is sent as a stable digest', async () => {

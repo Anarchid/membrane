@@ -129,10 +129,13 @@ export interface OpenAIResponsesAPIAdapterConfig {
   onFastModeFallback?: (serviceTier: string) => void;
   /** Subscription mode: base of the prompt-cache routing id sent as the
    * `session_id` header and as `prompt_cache_key`. Each request appends a digest
-   * of its instructions and first input item, so the logical streams sharing one
-   * adapter (an agent, its compression calls) get distinct stable ids. A
-   * request's own `extra.prompt_cache_key` is used verbatim instead. Defaults to
-   * a random id held for the adapter's lifetime. */
+   * of its instructions and first input item, which groups requests by
+   * serialized head: requests that share a head share an id (and a prefix, so
+   * that is the right grouping), tools and later items are not considered.
+   * Streams that need isolation beyond that (same-head forks or subagents on
+   * one adapter) should set `extra.prompt_cache_key`, which is used instead.
+   * Defaults to a random id held for the adapter's lifetime, so a restart
+   * pays one uncached read per head; pin it to survive restarts. */
   sessionId?: string;
   /** API base URL (defaults to the selected mode's endpoint). */
   baseURL?: string;
@@ -378,23 +381,27 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     request: OpenAIResponsesAPIRequest,
     signal?: AbortSignal,
   ): Promise<Response> {
+    // Built with set() because header names are case-insensitive: spreading into
+    // an object lets `Session_Id` in extraHeaders coexist with the computed
+    // `session_id`, and Headers then joins the two into one comma-separated value.
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    if (this.organization) headers.set('OpenAI-Organization', this.organization);
+    if (this.project) headers.set('OpenAI-Project', this.project);
+    if (this.subscription) {
+      // The subscription backend keys its prompt cache on this header and
+      // ignores the body's prompt_cache_key: without it every response gets a
+      // fresh random key and a byte-stable prefix still reads cached_tokens 0
+      // (probed live 2026-09-21: 0 of 9.2k without, 9088 of 9256 with). Warm
+      // calls still miss sporadically whatever the id: 3 of 28 on a dedicated
+      // id, 3 of 13 on one shared by two interleaved prefixes.
+      headers.set('session_id', headerSafeSessionId(String(request.prompt_cache_key)));
+    }
+    for (const [name, value] of Object.entries(this.extraHeaders)) headers.set(name, value);
     return fetchWithCredentials(`${this.baseURL}/responses`, {
       method: 'POST',
       body: JSON.stringify(request),
       signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(this.organization ? { 'OpenAI-Organization': this.organization } : {}),
-        ...(this.project ? { 'OpenAI-Project': this.project } : {}),
-        // The subscription backend keys its prompt cache on this header and
-        // ignores the body's prompt_cache_key: without it every response gets a
-        // fresh random key and a byte-stable prefix still reads cached_tokens 0
-        // (probed live 2026-09-21: 0 of 9.2k without, 9088 of 9256 with). One id
-        // shared by two interleaved prefixes missed 3 of 13 warm calls, an id
-        // per prefix 1 of 20, hence the per-stream digest in buildRequest.
-        ...(this.subscription ? { session_id: headerSafeSessionId(String(request.prompt_cache_key)) } : {}),
-        ...this.extraHeaders,
-      },
+      headers,
     }, this.credentials ?? { token: this.apiKey });
   }
 
@@ -453,6 +460,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       else delete responsesRequest.service_tier;
       if (typeof responsesRequest.prompt_cache_key !== 'string' || !responsesRequest.prompt_cache_key) {
         const head = createHash('sha256')
+          .update(this.sessionId)
           .update(JSON.stringify([responsesRequest.instructions ?? '', responsesRequest.input[0] ?? null]))
           .digest('hex')
           .slice(0, 12);
