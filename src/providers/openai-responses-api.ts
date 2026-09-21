@@ -146,6 +146,14 @@ export interface OpenAIResponsesAPIAdapterConfig {
   extraHeaders?: Record<string, string>;
 }
 
+/** A cache key is any JSON string, a header value is not: anything beyond
+ * short visible ASCII is sent as a digest, which is just as stable. */
+function headerSafeSessionId(key: string): string {
+  return /^[\x21-\x7e]{1,128}$/.test(key)
+    ? key
+    : createHash('sha256').update(key).digest('hex').slice(0, 32);
+}
+
 // ============================================================================
 // Adapter
 // ============================================================================
@@ -384,7 +392,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         // (probed live 2026-09-21: 0 of 9.2k without, 9088 of 9256 with). One id
         // shared by two interleaved prefixes missed 3 of 13 warm calls, an id
         // per prefix 1 of 20, hence the per-stream digest in buildRequest.
-        ...(this.subscription ? { session_id: String(request.prompt_cache_key) } : {}),
+        ...(this.subscription ? { session_id: headerSafeSessionId(String(request.prompt_cache_key)) } : {}),
         ...this.extraHeaders,
       },
     }, this.credentials ?? { token: this.apiKey });

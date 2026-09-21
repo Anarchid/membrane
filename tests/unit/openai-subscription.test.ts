@@ -81,6 +81,31 @@ describe('OpenAI Responses subscription mode', () => {
     expect(seen[4].header).toMatch(/^pinned:[0-9a-f]{12}$/);
   });
 
+  test('a cache key that is not a valid header value is sent as a stable digest', async () => {
+    const seen: Array<{ header: string | null; key: unknown }> = [];
+    globalThis.fetch = async (_input, init) => {
+      seen.push({
+        header: new Headers(init?.headers).get('session_id'),
+        key: JSON.parse(String(init?.body)).prompt_cache_key,
+      });
+      return completedResponse();
+    };
+    const credentials: CredentialResolver = async () => ({ token: 'subscription-token' });
+    const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials, sessionId: 'агент\n1' });
+
+    for (const key of ['line\nbreak', 'ключ', 'x'.repeat(500)]) {
+      await adapter.complete(request({ prompt_cache_key: key }));
+      await adapter.complete(request({ prompt_cache_key: key }));
+      const [first, second] = seen.slice(-2);
+      expect(first.key).toBe(key);
+      expect(first.header).toMatch(/^[0-9a-f]{32}$/);
+      expect(second.header).toBe(first.header);
+    }
+    await adapter.complete(request());
+    expect(seen.at(-1)!.header).toMatch(/^[0-9a-f]{32}$/);
+    expect(new Set(seen.map((entry) => entry.header)).size).toBe(4);
+  });
+
   test('api mode sends no session_id and leaves prompt_cache_key to the caller', async () => {
     let header: string | null = 'unset';
     let key: unknown = 'unset';
