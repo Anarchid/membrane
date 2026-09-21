@@ -9,6 +9,7 @@
  * exposes the response's ordered output array verbatim for the next turn.
  */
 
+import { createHash, randomUUID } from 'node:crypto';
 import { normalizeResponsesInput } from './responses-input.js';
 import { fetchWithCredentials, type CredentialResolver } from './credentials.js';
 
@@ -126,6 +127,13 @@ export interface OpenAIResponsesAPIAdapterConfig {
   fastMode?: boolean;
   /** Called once if a subscription response reports a non-priority tier. */
   onFastModeFallback?: (serviceTier: string) => void;
+  /** Subscription mode: base of the prompt-cache routing id sent as the
+   * `session_id` header and as `prompt_cache_key`. Each request appends a digest
+   * of its instructions and first input item, so the logical streams sharing one
+   * adapter (an agent, its compression calls) get distinct stable ids. A
+   * request's own `extra.prompt_cache_key` is used verbatim instead. Defaults to
+   * a random id held for the adapter's lifetime. */
+  sessionId?: string;
   /** API base URL (defaults to the selected mode's endpoint). */
   baseURL?: string;
   /** Optional OpenAI organization ID. */
@@ -162,6 +170,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private fastMode: boolean;
   private readonly onFastModeFallback?: (serviceTier: string) => void;
   private warnedFastFallback = false;
+  private readonly sessionId: string;
   private readonly baseURL: string;
   private readonly organization?: string;
   private readonly project?: string;
@@ -177,6 +186,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     }
     this.fastMode = config.fastMode ?? false;
     this.onFastModeFallback = config.onFastModeFallback;
+    this.sessionId = config.sessionId ?? randomUUID();
     this.apiKey = config.apiKey ?? process.env.OPENAI_API_KEY ?? '';
     this.baseURL = (config.baseURL ?? (this.subscription ? 'https://chatgpt.com/backend-api/codex' : 'https://api.openai.com/v1')).replace(/\/$/, '');
     this.organization = config.organization;
@@ -368,6 +378,13 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         'Content-Type': 'application/json',
         ...(this.organization ? { 'OpenAI-Organization': this.organization } : {}),
         ...(this.project ? { 'OpenAI-Project': this.project } : {}),
+        // The subscription backend keys its prompt cache on this header and
+        // ignores the body's prompt_cache_key: without it every response gets a
+        // fresh random key and a byte-stable prefix still reads cached_tokens 0
+        // (probed live 2026-09-21: 0 of 9.2k without, 9088 of 9256 with). One id
+        // shared by two interleaved prefixes missed 3 of 13 warm calls, an id
+        // per prefix 1 of 20, hence the per-stream digest in buildRequest.
+        ...(this.subscription ? { session_id: String(request.prompt_cache_key) } : {}),
         ...this.extraHeaders,
       },
     }, this.credentials ?? { token: this.apiKey });
@@ -426,6 +443,13 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       }
       if (this.fastMode) responsesRequest.service_tier = 'priority';
       else delete responsesRequest.service_tier;
+      if (typeof responsesRequest.prompt_cache_key !== 'string' || !responsesRequest.prompt_cache_key) {
+        const head = createHash('sha256')
+          .update(JSON.stringify([responsesRequest.instructions ?? '', responsesRequest.input[0] ?? null]))
+          .digest('hex')
+          .slice(0, 12);
+        responsesRequest.prompt_cache_key = `${this.sessionId}:${head}`;
+      }
     }
     return responsesRequest;
   }
